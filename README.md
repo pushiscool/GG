@@ -74,3 +74,7 @@ And it should post:
 ```text
 <@920819377627099166> btw for review
 ```
+
+## Troubleshooting
+
+If you see `PrivilegedIntentsRequired`, open the Discord Developer Portal, go to the application, open **Bot**, turn on **Message Content Intent**, save changes, then run `python bot.py` again.
