@@ -16,6 +16,7 @@ from nextcord.ext import commands
 
 ALERT_USER_ID = 920819377627099166
 ALERT_MESSAGE = f"<@{ALERT_USER_ID}>"
+ALLOWED_CHANNEL_ID = 1515821430586216468
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v", ".mkv"}
@@ -669,6 +670,9 @@ class SafetyBot(commands.Bot):
             return
 
         if getattr(getattr(message, "author", None), "bot", False):
+            return
+
+        if message.channel.id != ALLOWED_CHANNEL_ID:
             return
 
         assessment = await self.assess_message(message)
