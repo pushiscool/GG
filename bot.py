@@ -135,6 +135,8 @@ STRONG_ACTION_TERMS = (
 WEAK_ACTION_TERMS = (
     "click",
     "tap",
+    "go to",
+    "open",
     "visit",
     "page",
     "continue",
@@ -260,6 +262,10 @@ def assess_scam_text(
     if has_bare_domain and not has_url:
         score += 20
         reasons.append("external website")
+
+    if has_bare_domain and has_giveaway:
+        score += 35
+        reasons.append("external website tied to a reward offer")
 
     if has_off_platform and (has_dm_lure or has_url or has_bare_domain):
         score += 20
