@@ -15,12 +15,7 @@ from nextcord.ext import commands
 
 
 REVIEW_USER_ID = 920819377627099166
-ALERT_MESSAGE = f"<@{REVIEW_USER_ID}> btw for review"
-SAFE_MARKER = "(image marked safe)"
-DANGEROUS_MARKER = "(image marked dangerous)"
-VIDEO_SAFE_MARKER = "(video marked safe)"
-VIDEO_DANGEROUS_MARKER = "(video marked dangerous)"
-TEXT_DANGEROUS_MARKER = "(message marked dangerous)"
+ALERT_MESSAGE = f"<@{REVIEW_USER_ID}>"
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v", ".mkv"}
@@ -183,13 +178,6 @@ class ScamAssessment:
     @property
     def should_alert(self) -> bool:
         return self.score >= ALERT_THRESHOLD
-
-
-def env_bool(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def normalize_text(value: Optional[str]) -> str:
@@ -594,8 +582,6 @@ class SafetyBot(commands.Bot):
         intents.messages = True
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
-        self.review_channel_id = int(os.getenv("REVIEW_CHANNEL_ID", "0") or 0)
-        self.post_safety_markers = env_bool("POST_SAFETY_MARKERS", True)
 
     async def on_ready(self) -> None:
         print(f"Logged in as {self.user}")
@@ -643,64 +629,53 @@ class SafetyBot(commands.Bot):
         visual_urls = visual_urls_from_message(message)
         has_media = bool(visual_attachments or video_attachments or visual_urls)
 
-        text_parts = [getattr(message, "content", "")]
+        message_text = getattr(message, "content", "") or ""
+        media_text_parts: list[str] = []
         has_qr = False
         nsfw_detections = []
         content_kind = "video" if video_attachments and not visual_attachments and not visual_urls else "image"
 
         for attachment in visual_attachments:
-            text_parts.append(getattr(attachment, "filename", ""))
+            media_text_parts.append(getattr(attachment, "filename", ""))
             extracted_text, attachment_has_qr, attachment_nsfw_detections = await self.scan_attachment(attachment)
             if extracted_text:
-                text_parts.append(extracted_text)
+                media_text_parts.append(extracted_text)
             has_qr = has_qr or attachment_has_qr
             nsfw_detections.extend(attachment_nsfw_detections)
 
         for attachment in video_attachments:
-            text_parts.append(getattr(attachment, "filename", ""))
+            media_text_parts.append(getattr(attachment, "filename", ""))
             extracted_text, attachment_has_qr, attachment_nsfw_detections = await self.scan_video_attachment(attachment)
             if extracted_text:
-                text_parts.append(extracted_text)
+                media_text_parts.append(extracted_text)
             has_qr = has_qr or attachment_has_qr
             nsfw_detections.extend(attachment_nsfw_detections)
 
-        assessment = assess_scam_text(
-            "\n".join(text_parts),
-            has_qr=has_qr,
-            has_visual_attachment=has_media,
-            nsfw_detections=nsfw_detections,
-            content_kind=content_kind if has_media else "text",
-        )
+        assessments = []
+        if message_text.strip():
+            assessments.append(
+                assess_scam_text(
+                    message_text,
+                    has_visual_attachment=False,
+                    content_kind="text",
+                )
+            )
 
-        if not has_media and not assessment.should_alert:
+        if has_media:
+            assessments.append(
+                assess_scam_text(
+                    "\n".join(media_text_parts),
+                    has_qr=has_qr,
+                    has_visual_attachment=True,
+                    nsfw_detections=nsfw_detections,
+                    content_kind=content_kind,
+                )
+            )
+
+        alert_assessments = [assessment for assessment in assessments if assessment.should_alert]
+        if not alert_assessments:
             return None
-        return assessment
-
-    async def send_safety_marker(self, message: nextcord.Message, assessment: ScamAssessment) -> None:
-        if not self.post_safety_markers:
-            return
-
-        if assessment.content_kind == "text" and not assessment.should_alert:
-            return
-
-        if assessment.content_kind == "text":
-            marker = TEXT_DANGEROUS_MARKER
-        elif assessment.content_kind == "video":
-            marker = VIDEO_DANGEROUS_MARKER if assessment.should_alert else VIDEO_SAFE_MARKER
-        else:
-            marker = DANGEROUS_MARKER if assessment.should_alert else SAFE_MARKER
-
-        try:
-            await message.channel.send(marker)
-        except (nextcord.Forbidden, nextcord.HTTPException):
-            pass
-
-    def review_channel_for(self, message: nextcord.Message):
-        if self.review_channel_id:
-            channel = self.get_channel(self.review_channel_id)
-            if channel is not None:
-                return channel
-        return message.channel
+        return max(alert_assessments, key=lambda assessment: assessment.score)
 
     def build_alert_embed(self, message: nextcord.Message, assessment: ScamAssessment) -> nextcord.Embed:
         original_content = getattr(message, "content", "") or ""
@@ -721,7 +696,7 @@ class SafetyBot(commands.Bot):
 
         if original_content:
             embed.add_field(name="Original Text", value=clip(original_content, 1000), inline=False)
-        if assessment.scanned_text:
+        if assessment.scanned_text and assessment.content_kind != "text":
             embed.add_field(name="Scanned Text", value=clip(f"`{assessment.scanned_text}`", 1000), inline=False)
 
         jump_url = getattr(message, "jump_url", None)
@@ -745,14 +720,8 @@ class SafetyBot(commands.Bot):
         if assessment is None:
             return
 
-        await self.send_safety_marker(message, assessment)
-
-        if not assessment.should_alert:
-            return
-
-        channel = self.review_channel_for(message)
         try:
-            await channel.send(
+            await message.channel.send(
                 content=ALERT_MESSAGE,
                 embed=self.build_alert_embed(message, assessment),
                 allowed_mentions=nextcord.AllowedMentions(users=True, roles=False, everyone=False),
@@ -766,7 +735,14 @@ def main() -> None:
     token = os.getenv("SAFETY_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
     if not token:
         raise RuntimeError("Put SAFETY_BOT_TOKEN in .env before running the bot.")
-    SafetyBot().run(token)
+    try:
+        SafetyBot().run(token)
+    except nextcord.PrivilegedIntentsRequired as exc:
+        raise RuntimeError(
+            "Message Content Intent is not enabled for this bot. "
+            "Open the Discord Developer Portal, go to your application, open Bot, "
+            "turn on Message Content Intent, save changes, then run python bot.py again."
+        ) from exc
 
 
 if __name__ == "__main__":
