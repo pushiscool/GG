@@ -14,8 +14,8 @@ from dotenv import load_dotenv
 from nextcord.ext import commands
 
 
-REVIEW_USER_ID = 920819377627099166
-ALERT_MESSAGE = f"<@{REVIEW_USER_ID}>"
+ALERT_USER_ID = 920819377627099166
+ALERT_MESSAGE = f"<@{ALERT_USER_ID}>"
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v", ".mkv"}
@@ -26,14 +26,9 @@ MAX_VIDEO_FRAMES = 5
 OCR_CONFIDENCE_THRESHOLD = 0.45
 NSFW_SCORE_THRESHOLD = 0.55
 
-LOW_RISK = "low"
-MEDIUM_RISK = "medium"
-HIGH_RISK = "high"
 ALERT_THRESHOLD = 70
-REVIEW_THRESHOLD = 45
 
 URL_RE = re.compile(r"https?://|discord\.gift|discord\.gg|www\.", re.IGNORECASE)
-URL_TOKEN_RE = re.compile(r"https?://\S+", re.IGNORECASE)
 SHORTENER_RE = re.compile(
     r"\b(?:bit\.ly|tinyurl\.com|t\.co|goo\.gl|is\.gd|cutt\.ly|rebrand\.ly|rb\.gy)\b",
     re.IGNORECASE,
@@ -170,7 +165,6 @@ _nude_detector_unavailable = False
 @dataclass(frozen=True)
 class ScamAssessment:
     score: int
-    level: str
     reasons: tuple[str, ...]
     scanned_text: str = ""
     content_kind: str = "image"
@@ -188,14 +182,6 @@ def contains_any(text: str, terms: Iterable[str]) -> bool:
     return any(term in text for term in terms)
 
 
-def score_to_level(score: int) -> str:
-    if score >= ALERT_THRESHOLD:
-        return HIGH_RISK
-    if score >= REVIEW_THRESHOLD:
-        return MEDIUM_RISK
-    return LOW_RISK
-
-
 def clip(text: str, limit: int = 1000) -> str:
     if len(text) <= limit:
         return text
@@ -206,7 +192,7 @@ def assess_scam_text(
     text: str,
     *,
     has_qr: bool = False,
-    has_visual_attachment: bool = True,
+    has_media: bool = True,
     nsfw_detections: Iterable[str] = (),
     content_kind: str = "image",
 ) -> ScamAssessment:
@@ -215,12 +201,12 @@ def assess_scam_text(
     reasons: list[str] = []
     nsfw_detections = tuple(nsfw_detections)
 
-    if has_visual_attachment:
+    if has_media:
         score += 5
 
     if nsfw_detections:
         score += 100
-        reasons.append("detects explicit or adult visual content")
+        reasons.append("explicit/adult visual content")
 
     has_brand = contains_any(normalized, BRAND_TERMS)
     has_money = bool(MONEY_RE.search(normalized))
@@ -236,69 +222,66 @@ def assess_scam_text(
 
     if has_brand:
         score += 15
-        reasons.append("mentions an impersonation-prone brand or creator")
+        reasons.append("brand or creator name")
 
     if has_giveaway:
         score += 20
-        reasons.append("uses giveaway, prize, money, or reward language")
+        reasons.append("money, giveaway, prize, or reward wording")
 
     if has_strong_action:
         score += 25
-        reasons.append("asks users to claim, verify, log in, scan, or enter sensitive info")
+        reasons.append("asks users to claim, verify, log in, scan, or enter info")
     elif has_weak_action:
         score += 5
-        reasons.append("uses weak call-to-action language")
+        reasons.append("call-to-action wording")
 
     if has_dm_lure:
         score += 25
-        reasons.append("asks people to DM, contact privately, or be the 'first' to respond")
+        reasons.append("asks people to DM or contact privately")
 
     if has_money and has_dm_lure:
         score += 30
-        reasons.append("offers money or prizes in exchange for DMing or contacting privately")
+        reasons.append("money/prize offer plus private contact")
     elif has_giveaway and has_dm_lure:
         score += 10
-        reasons.append("combines giveaway or free-stuff language with a request to contact privately")
+        reasons.append("giveaway wording plus private contact")
 
     if has_bare_domain and not has_url:
         score += 20
-        reasons.append("points users to an external website")
+        reasons.append("external website")
 
     if has_off_platform and (has_dm_lure or has_url or has_bare_domain):
         score += 20
-        reasons.append("tries to move users to an off-platform app like Telegram or WhatsApp")
+        reasons.append("moves users to another app")
 
     if has_url:
         score += 30
-        reasons.append("contains a link or suspicious domain")
+        reasons.append("link or suspicious domain")
 
     if has_qr:
         score += 30
-        reasons.append("contains a QR code")
+        reasons.append("QR code")
 
     if HANDLE_RE.search(normalized) and has_giveaway:
         score += 10
-        reasons.append("combines a mention with reward language")
+        reasons.append("mention plus reward wording")
 
     if has_brand and has_giveaway and (has_strong_action or has_url or has_qr):
         score += 15
-        reasons.append("combines brand impersonation, reward language, and a risky action")
+        reasons.append("brand, reward, and risky action")
 
     if has_brand and has_giveaway and has_weak_action and not has_strong_action and not has_url and not has_qr:
         score += 25
-        reasons.append("looks like a creator giveaway ad asking users to visit or continue")
+        reasons.append("creator giveaway ad wording")
 
     if has_parody and not has_url and not has_qr and not has_strong_action:
         score = max(0, score - 25)
-        reasons.append("looks like a joke/parody without a link, QR code, or account action")
+        reasons.append("joke/parody wording without a risky action")
 
     score = min(score, 100)
-    if score < REVIEW_THRESHOLD and not reasons:
-        reasons.append("no strong scam signals found")
 
     return ScamAssessment(
         score=score,
-        level=score_to_level(score),
         reasons=tuple(reasons),
         scanned_text=clip(text, 500),
         content_kind=content_kind,
@@ -317,33 +300,6 @@ def is_video_attachment(attachment) -> bool:
     filename = normalize_text(getattr(attachment, "filename", ""))
     suffix = Path(filename).suffix
     return content_type.startswith("video/") or suffix in VIDEO_EXTENSIONS
-
-
-def clean_url(value: str) -> str:
-    return str(value or "").strip("<>()[]{}.,!?")
-
-
-def is_visual_url(value: str) -> bool:
-    url = clean_url(value).lower()
-    without_query = url.split("?", 1)[0].split("#", 1)[0]
-    return (
-        without_query.endswith(tuple(IMAGE_EXTENSIONS))
-        or "tenor.com/view/" in url
-        or "giphy.com/gifs/" in url
-        or "media.discordapp.net/" in url
-        or "cdn.discordapp.com/" in url
-    )
-
-
-def visual_urls_from_message(message) -> list[str]:
-    urls = [clean_url(match.group(0)) for match in URL_TOKEN_RE.finditer(getattr(message, "content", "") or "")]
-    for embed in getattr(message, "embeds", []) or []:
-        for attr_name in ("image", "thumbnail"):
-            embed_image = getattr(embed, attr_name, None)
-            image_url = getattr(embed_image, "url", None)
-            if image_url:
-                urls.append(clean_url(image_url))
-    return [url for url in urls if is_visual_url(url)]
 
 
 def attachment_label(attachment) -> str:
@@ -626,14 +582,13 @@ class SafetyBot(commands.Bot):
         video_attachments = [
             attachment for attachment in getattr(message, "attachments", []) if is_video_attachment(attachment)
         ]
-        visual_urls = visual_urls_from_message(message)
-        has_media = bool(visual_attachments or video_attachments or visual_urls)
+        has_media = bool(visual_attachments or video_attachments)
 
         message_text = getattr(message, "content", "") or ""
         media_text_parts: list[str] = []
         has_qr = False
         nsfw_detections = []
-        content_kind = "video" if video_attachments and not visual_attachments and not visual_urls else "image"
+        content_kind = "video" if video_attachments and not visual_attachments else "image"
 
         for attachment in visual_attachments:
             media_text_parts.append(getattr(attachment, "filename", ""))
@@ -656,7 +611,7 @@ class SafetyBot(commands.Bot):
             assessments.append(
                 assess_scam_text(
                     message_text,
-                    has_visual_attachment=False,
+                    has_media=False,
                     content_kind="text",
                 )
             )
@@ -666,7 +621,7 @@ class SafetyBot(commands.Bot):
                 assess_scam_text(
                     "\n".join(media_text_parts),
                     has_qr=has_qr,
-                    has_visual_attachment=True,
+                    has_media=True,
                     nsfw_detections=nsfw_detections,
                     content_kind=content_kind,
                 )
@@ -691,7 +646,7 @@ class SafetyBot(commands.Bot):
         )
         embed.add_field(name="User", value=f"{author_mention} (`{author_id}`)", inline=False)
         embed.add_field(name="Channel", value=channel_mention, inline=True)
-        embed.add_field(name="Risk", value=f"{assessment.level.title()} ({assessment.score}/100)", inline=True)
+        embed.add_field(name="Score", value=f"{assessment.score}/100", inline=True)
         embed.add_field(name="Reasons", value=clip("\n".join(f"- {reason}" for reason in assessment.reasons), 1000), inline=False)
 
         if original_content:
