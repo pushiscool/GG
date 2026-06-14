@@ -1,0 +1,6 @@
+nextcord
+python-dotenv
+nudenet>=3.4.2
+rapidocr-onnxruntime>=1.4.4
+Pillow
+opencv-python-headless
