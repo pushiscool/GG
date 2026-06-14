@@ -687,17 +687,7 @@ class SafetyBot(commands.Bot):
 
 def main() -> None:
     load_dotenv()
-    token = os.getenv("SAFETY_BOT_TOKEN") or os.getenv("DISCORD_TOKEN")
-    if not token:
-        raise RuntimeError("Put SAFETY_BOT_TOKEN in .env before running the bot.")
-    try:
-        SafetyBot().run(token)
-    except nextcord.PrivilegedIntentsRequired as exc:
-        raise RuntimeError(
-            "Message Content Intent is not enabled for this bot. "
-            "Open the Discord Developer Portal, go to your application, open Bot, "
-            "turn on Message Content Intent, save changes, then run python bot.py again."
-        ) from exc
+    SafetyBot().run(os.environ["SAFETY_BOT_TOKEN"])
 
 
 if __name__ == "__main__":
