@@ -13,7 +13,7 @@ cp .env.example .env
 Edit `.env`:
 
 ```env
-SAFETY_BOT_TOKEN=your_separate_bot_token
+SAFETY_BOT_TOKEN=Bot_Token
 ```
 
 ## Discord Portal
