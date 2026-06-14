@@ -16,7 +16,10 @@ from nextcord.ext import commands
 
 ALERT_USER_ID = 920819377627099166
 ALERT_MESSAGE = f"<@{ALERT_USER_ID}>"
-ALLOWED_CHANNEL_ID = 1515821430586216468
+ALLOWED_CHANNEL_IDS = {
+    1515821430586216468,
+    1508284501485162541,
+}
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v", ".mkv"}
@@ -52,6 +55,12 @@ DM_LURE_RE = re.compile(
     r"|\bdm\s+(?:me|us)\b"
     r"|\bfirst\s+(?:\d+|person|people|few|one|to)\b"
     r"|\bwho(?:ever)?\s+(?:dms|messages|pms|contacts)\b",
+    re.IGNORECASE,
+)
+META_EXAMPLE_RE = re.compile(
+    r"\b(?:for example|example|hypothetically|imagine|something like|it's like|its like)\b"
+    r"|\b(?:if|when|whenever)\s+someone\s+(?:says?|posts?|sends?|messages?)\b"
+    r"|\b(?:someone|people)\s+(?:saying|posting|sending|messaging)\b",
     re.IGNORECASE,
 )
 HOOK_RE = re.compile(
@@ -220,6 +229,7 @@ def assess_scam_text(
     has_bare_domain = bool(BARE_DOMAIN_RE.search(normalized))
     has_url = bool(URL_RE.search(normalized) or SHORTENER_RE.search(normalized) or SUSPICIOUS_DOMAIN_RE.search(normalized))
     has_parody = contains_any(normalized, PARODY_TERMS)
+    is_meta_example = bool(META_EXAMPLE_RE.search(normalized))
 
     if has_brand:
         score += 15
@@ -278,6 +288,10 @@ def assess_scam_text(
     if has_parody and not has_url and not has_qr and not has_strong_action:
         score = max(0, score - 25)
         reasons.append("joke/parody wording without a risky action")
+
+    if is_meta_example and not has_url and not has_qr and not has_bare_domain and not has_strong_action:
+        score = max(0, score - 60)
+        reasons.append("talking about an example instead of making the offer")
 
     score = min(score, 100)
 
@@ -672,7 +686,7 @@ class SafetyBot(commands.Bot):
         if getattr(getattr(message, "author", None), "bot", False):
             return
 
-        if message.channel.id != ALLOWED_CHANNEL_ID:
+        if message.channel.id not in ALLOWED_CHANNEL_IDS:
             return
 
         assessment = await self.assess_message(message)
