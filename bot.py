@@ -154,6 +154,17 @@ PARODY_TERMS = (
     "drawing",
     "drawn",
 )
+GAME_RESULT_TERMS = (
+    "game review",
+    "rematch",
+    "new 1 min",
+    "well done",
+    "built a lead",
+    "brilliant",
+    "great",
+    "best",
+    "timeout",
+)
 NSFW_CLASSES = {
     "ANUS_EXPOSED",
     "BUTTOCKS_EXPOSED",
@@ -232,6 +243,7 @@ def assess_scam_text(
     has_url = bool(URL_RE.search(normalized) or SHORTENER_RE.search(normalized) or SUSPICIOUS_DOMAIN_RE.search(normalized))
     has_parody = contains_any(normalized, PARODY_TERMS)
     is_meta_example = bool(META_EXAMPLE_RE.search(normalized))
+    game_result_terms = sum(term in normalized for term in GAME_RESULT_TERMS)
 
     if has_brand:
         score += 15
@@ -275,6 +287,10 @@ def assess_scam_text(
         score += 30
         reasons.append("link or suspicious domain")
 
+    if has_url and has_giveaway:
+        score += 25
+        reasons.append("link tied to a reward offer")
+
     if has_qr:
         score += 30
         reasons.append("QR code")
@@ -298,6 +314,10 @@ def assess_scam_text(
     if is_meta_example and not has_url and not has_qr and not has_bare_domain and not has_strong_action:
         score = max(0, score - 60)
         reasons.append("talking about an example instead of making the offer")
+
+    if game_result_terms >= 2 and not has_strong_action and not has_dm_lure and not has_qr and not has_brand:
+        score = max(0, score - 85)
+        reasons.append("looks like a game result screen")
 
     score = min(score, 100)
 
