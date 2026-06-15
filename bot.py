@@ -63,6 +63,13 @@ META_EXAMPLE_RE = re.compile(
     r"|\b(?:someone|people)\s+(?:saying|posting|sending|messaging)\b",
     re.IGNORECASE,
 )
+CONVERSATION_RE = re.compile(
+    r"\b(?:is this|does this|would this|could this|should this|why does this)\b"
+    r"|\b(?:i got scammed|got scammed|this is a scam|looks like a scam|watch out|be careful|avoid this)\b"
+    r"|\b(?:someone told me|someone sent me|they told me|they sent me|my friend sent me)\b"
+    r"|\b(?:talking about|asking about|discussing|explaining)\b",
+    re.IGNORECASE,
+)
 HOOK_RE = re.compile(
     r"\b(?:get|getting|become|becoming)\s+rich\b"
     r"|\brich\s+quick\b"
@@ -165,6 +172,13 @@ GAME_RESULT_TERMS = (
     "best",
     "timeout",
 )
+AD_CONTEXT_TERMS = (
+    "ad",
+    "learn more",
+    "remove ads",
+    "sponsored",
+    "advertisement",
+)
 NSFW_CLASSES = {
     "ANUS_EXPOSED",
     "BUTTOCKS_EXPOSED",
@@ -243,7 +257,12 @@ def assess_scam_text(
     has_url = bool(URL_RE.search(normalized) or SHORTENER_RE.search(normalized) or SUSPICIOUS_DOMAIN_RE.search(normalized))
     has_parody = contains_any(normalized, PARODY_TERMS)
     is_meta_example = bool(META_EXAMPLE_RE.search(normalized))
+    is_conversation = bool(CONVERSATION_RE.search(normalized))
     game_result_terms = sum(term in normalized for term in GAME_RESULT_TERMS)
+    ad_context_terms = sum(term in normalized for term in AD_CONTEXT_TERMS)
+    has_delivery_path = has_url or has_bare_domain or has_qr or has_dm_lure or has_strong_action or has_off_platform
+    has_domain_reward = (has_url or has_bare_domain) and has_giveaway
+    has_private_reward = has_dm_lure and has_giveaway
 
     if has_brand:
         score += 15
@@ -275,7 +294,7 @@ def assess_scam_text(
         score += 20
         reasons.append("external website")
 
-    if has_bare_domain and has_giveaway:
+    if has_domain_reward:
         score += 35
         reasons.append("external website tied to a reward offer")
 
@@ -318,6 +337,18 @@ def assess_scam_text(
     if game_result_terms >= 2 and not has_strong_action and not has_dm_lure and not has_qr and not has_brand:
         score = max(0, score - 85)
         reasons.append("looks like a game result screen")
+
+    if is_conversation and not has_domain_reward and not has_private_reward and not has_qr and not has_strong_action:
+        score = min(score, 45)
+        reasons.append("looks like discussion instead of a live scam")
+
+    if ad_context_terms >= 2 and not has_domain_reward and not has_dm_lure and not has_qr and not has_strong_action:
+        score = min(score, 45)
+        reasons.append("looks like a normal ad or app screen")
+
+    if has_giveaway and not has_delivery_path and not has_brand:
+        score = min(score, 55)
+        reasons.append("reward wording without a link, domain, QR, login, or DM path")
 
     score = min(score, 100)
 
