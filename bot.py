@@ -105,6 +105,8 @@ MAX_INVITES_PER_MESSAGE = max(1, _env_int("MAX_INVITES_PER_MESSAGE", 3))
 INVITE_RESOLVE_TIMEOUT = _env_int("INVITE_RESOLVE_TIMEOUT", 10)
 INVITE_CACHE_TTL = _env_int("INVITE_CACHE_TTL", 600)
 INVITE_CACHE_MAX = _env_int("INVITE_CACHE_MAX", 2000)
+FLAG_ALL_INVITES = _env_bool("FLAG_ALL_INVITES", True)
+INVITE_BASE_SCORE = _env_int("INVITE_BASE_SCORE", ALERT_THRESHOLD)
 
 
 
@@ -234,7 +236,7 @@ FREE_NITRO_RE = re.compile(
     re.IGNORECASE,
 )
 INVITE_RE = re.compile(
-    r"(?:discord\.gg|discord(?:app)?\.com/invite)/([a-z0-9][a-z0-9-]{1,31})",
+    r"(?:https?://)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com/invite)/+([a-z0-9][a-z0-9-]{1,31})",
     re.IGNORECASE,
 )
 NSFW_TERMS_RE = re.compile(
@@ -403,6 +405,13 @@ def normalize_text(value: Optional[str]) -> str:
 def strip_discord_markup(text: str) -> str:
 
     return re.sub(r"[|*_~`]", "", text or "")
+
+
+def invite_match_text(text: str) -> str:
+    text = strip_discord_markup(text or "")
+    text = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", text)
+    text = re.sub(r"\s*([./])\s*", r"\1", text)
+    return re.sub(r"\s+", " ", text)
 
 
 def contains_any(text: str, terms: Iterable[str]) -> bool:
@@ -631,7 +640,7 @@ def assess_scam_text(
 def extract_invite_codes(text: str) -> list[str]:
     codes: list[str] = []
 
-    for match in INVITE_RE.finditer(strip_discord_markup(text or "")):
+    for match in INVITE_RE.finditer(invite_match_text(text)):
         code = match.group(1)
         if code.lower() == "invite" or code in codes:
             continue
@@ -688,6 +697,50 @@ def assess_invite_guild(
     )
 
 
+def invite_link_assessment(code: str) -> ScamAssessment:
+    return ScamAssessment(
+        score=max(INVITE_BASE_SCORE, ALERT_THRESHOLD),
+        reasons=("contains a Discord server invite link",),
+        scanned_text=clip(f"invite -> {code}", 500),
+        content_kind="invite",
+    )
+
+
+def first_invite_link_assessment(text: str) -> Optional[ScamAssessment]:
+    if not FLAG_ALL_INVITES:
+        return None
+    codes = extract_invite_codes(text)[:MAX_INVITES_PER_MESSAGE]
+    if not codes:
+        return None
+    return invite_link_assessment(codes[0])
+
+
+def apply_invite_policy(code: str, resolved: Optional[ScamAssessment]) -> Optional[ScamAssessment]:
+    if resolved is not None and resolved.should_alert:
+        return resolved
+
+    if not FLAG_ALL_INVITES:
+        return resolved
+
+    if resolved is not None:
+        score = max(INVITE_BASE_SCORE, resolved.score)
+        label = resolved.scanned_text or f"invite -> {code}"
+        reasons = [r for r in resolved.reasons if r != "discord server invite"]
+        if not reasons:
+            reasons = ["contains a Discord server invite link"]
+    else:
+        score = INVITE_BASE_SCORE
+        label = f"invite -> {code}"
+        reasons = ["contains a Discord server invite link"]
+
+    return ScamAssessment(
+        score=min(score, 100),
+        reasons=tuple(reasons),
+        scanned_text=clip(label, 500),
+        content_kind="invite",
+    )
+
+
 def is_visual_attachment(attachment) -> bool:
     content_type = normalize_text(getattr(attachment, "content_type", ""))
     filename = normalize_text(getattr(attachment, "filename", ""))
@@ -736,6 +789,31 @@ def media_urls_from_message(message) -> list[str]:
             add_url(embed_url)
 
     return urls
+
+
+def embed_text_from_message(message) -> list[str]:
+    chunks = []
+
+    def add(value) -> None:
+        if value:
+            chunks.append(str(value))
+
+    for embed in getattr(message, "embeds", []):
+        for attr in ("title", "description", "url"):
+            add(getattr(embed, attr, None))
+
+        author = getattr(embed, "author", None)
+        for attr in ("name", "url"):
+            add(getattr(author, attr, None))
+
+        footer = getattr(embed, "footer", None)
+        add(getattr(footer, "text", None))
+
+        for field in getattr(embed, "fields", []) or []:
+            add(getattr(field, "name", None))
+            add(getattr(field, "value", None))
+
+    return chunks
 
 
 def suffix_from_url(url: str) -> str:
@@ -1366,10 +1444,15 @@ class SafetyBot(commands.Bot):
             content = getattr(source, "content", "") or ""
             if content.strip():
                 text_chunks.append(content)
+            text_chunks.extend(embed_text_from_message(source))
 
         has_media = bool(visual_attachments or video_attachments or media_urls)
 
         message_text = "\n".join(text_chunks)
+        text_invite_assessment = first_invite_link_assessment(message_text)
+        if text_invite_assessment is not None:
+            return text_invite_assessment, forwarded_sources
+
         media_text_parts: list[str] = []
         has_qr = False
         nsfw_detections = []
@@ -1437,11 +1520,13 @@ class SafetyBot(commands.Bot):
             )
 
         try:
-            invite_codes = extract_invite_codes(message_text)[:MAX_INVITES_PER_MESSAGE]
+            invite_codes = extract_invite_codes(
+                "\n".join([message_text, *media_text_parts])
+            )[:MAX_INVITES_PER_MESSAGE]
         except Exception:
             invite_codes = []
         for code in invite_codes:
-            invite_assessment = await self.resolve_invite(code)
+            invite_assessment = apply_invite_policy(code, await self.resolve_invite(code))
             if invite_assessment is not None:
                 assessments.append(invite_assessment)
 
@@ -1638,7 +1723,10 @@ def run_cli(args: list[str]) -> int:
         if not text:
             print('usage: python bot.py --text "message to score"')
             return 2
-        _print_assessment(assess_scam_text(text, has_media=False, content_kind="text"))
+        _print_assessment(
+            first_invite_link_assessment(text)
+            or assess_scam_text(text, has_media=False, content_kind="text")
+        )
         return 0
 
     if mode in ("--invite", "-i"):
@@ -1648,32 +1736,37 @@ def run_cli(args: list[str]) -> int:
         raw = args[1]
         codes = extract_invite_codes(raw) or [raw.rstrip("/").split("/")[-1]]
         code = codes[0]
+        print(f"invite code : {code}")
+        print(f"FLAG_ALL_INVITES = {FLAG_ALL_INVITES} | INVITE_BASE_SCORE = {INVITE_BASE_SCORE}")
+        resolved = None
         try:
             invite = fetch_invite_guild(code)
-        except Exception as error:
-            print(f"could not resolve invite {code}: {error}")
-            return 1
-        guild = invite.get("guild") or {}
-        print(f"invite code : {code}")
-        print(f"server name : {guild.get('name')!r}")
-        print(f"description : {guild.get('description')!r}")
-        print(
-            f"nsfw_level  : {guild.get('nsfw_level')} "
-            f"(0=default, 1=explicit, 2=safe, 3=age-restricted)"
-        )
-        print(f"nsfw flag   : {guild.get('nsfw')}")
-        print(
-            f"members     : ~{invite.get('approximate_member_count')} "
-            f"({invite.get('approximate_presence_count')} online)"
-        )
-        _print_assessment(
-            assess_invite_guild(
+            guild = invite.get("guild") or {}
+            print(f"server name : {guild.get('name')!r}")
+            print(f"description : {guild.get('description')!r}")
+            print(
+                f"nsfw_level  : {guild.get('nsfw_level')} "
+                f"(0=default, 1=explicit, 2=safe, 3=age-restricted)"
+            )
+            print(f"nsfw flag   : {guild.get('nsfw')}")
+            print(
+                f"members     : ~{invite.get('approximate_member_count')} "
+                f"({invite.get('approximate_presence_count')} online)"
+            )
+            resolved = assess_invite_guild(
                 guild.get("name") or "",
                 guild.get("description") or "",
                 nsfw_level=guild.get("nsfw_level"),
                 nsfw_flag=bool(guild.get("nsfw")),
             )
-        )
+        except Exception as error:
+            print(f"destination : could NOT be resolved ({error})")
+        final = apply_invite_policy(code, resolved)
+        if final is None:
+            print("--- assessment ---")
+            print("verdict: safe — no alert (FLAG_ALL_INVITES is off and destination looks clean)")
+        else:
+            _print_assessment(final)
         return 0
 
     if len(args) < 2:
