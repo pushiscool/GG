@@ -68,6 +68,12 @@ def _env_ids(name: str, default: set) -> set:
     return parsed or set(default)
 
 
+def _env_words(name: str, default: set) -> set:
+    raw = os.environ.get(name, "")
+    parsed = {part.strip().lower() for part in re.split(r"[,\s]+", raw) if part.strip()}
+    return parsed or set(default)
+
+
 
 ALERT_USER_ID = _env_int("ALERT_USER_ID", 920819377627099166)
 ALERT_MESSAGE = f"<@{ALERT_USER_ID}>"
@@ -118,6 +124,7 @@ INVITE_CACHE_MAX = _env_int("INVITE_CACHE_MAX", 2000)
 
 FLAG_ALL_INVITES = _env_bool("FLAG_ALL_INVITES", True)
 INVITE_BASE_SCORE = _env_int("INVITE_BASE_SCORE", ALERT_THRESHOLD)
+ALLOWED_INVITE_CODES = _env_words("ALLOWED_INVITE_CODES", {"gohar"})
 
 
 
@@ -662,6 +669,18 @@ def extract_invite_codes(text: str) -> list[str]:
     return codes
 
 
+def normalize_invite_code(code: str) -> str:
+    return str(code or "").strip().lower()
+
+
+def is_allowed_invite_code(code: str) -> bool:
+    return normalize_invite_code(code) in ALLOWED_INVITE_CODES
+
+
+def disallowed_invite_codes(text: str) -> list[str]:
+    return [code for code in extract_invite_codes(text) if not is_allowed_invite_code(code)]
+
+
 def assess_invite_guild(
     name: str,
     description: str = "",
@@ -723,13 +742,16 @@ def invite_link_assessment(code: str) -> ScamAssessment:
 def first_invite_link_assessment(text: str) -> Optional[ScamAssessment]:
     if not FLAG_ALL_INVITES:
         return None
-    codes = extract_invite_codes(text)[:MAX_INVITES_PER_MESSAGE]
+    codes = disallowed_invite_codes(text)[:MAX_INVITES_PER_MESSAGE]
     if not codes:
         return None
     return invite_link_assessment(codes[0])
 
 
 def apply_invite_policy(code: str, resolved: Optional[ScamAssessment]) -> Optional[ScamAssessment]:
+    if is_allowed_invite_code(code):
+        return None
+
     if resolved is not None and resolved.should_alert:
         return resolved
 
@@ -1533,6 +1555,8 @@ class SafetyBot(commands.Bot):
         )
 
     async def build_invite_assessment(self, code: str) -> Optional[ScamAssessment]:
+        if is_allowed_invite_code(code):
+            return None
         return apply_invite_policy(code, await self.resolve_invite(code))
 
     async def assess_message(

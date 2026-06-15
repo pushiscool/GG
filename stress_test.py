@@ -37,6 +37,9 @@ def rnd_text(n):
 
 def fuzz_pure(iterations=12000):
     say(f"[1] pure-function fuzz: running {iterations} iterations...")
+    assert B.extract_invite_codes("join discord.gg/gohar") == ["gohar"]
+    assert B.first_invite_link_assessment("join discord.gg/gohar") is None
+    assert B.first_invite_link_assessment("join discord.gg/gohar and discord.gg/bad") is not None
     weird = [
         None, "", " ", "|" * 3000, "||" * 2000, "*" * 3000, "a" * 8000,
         "f||r||ee m||on||ey", "https://discord.gg/" + "x" * 1500,
