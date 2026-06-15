@@ -172,7 +172,8 @@ async def stress_handle(total=2000, concurrency=50):
     bot._invite_cache = B.OrderedDict()
     bot._heartbeat_task = None
     bot.http = FakeHTTP()
-    channel = FakeChannel(next(iter(B.ALLOWED_CHANNEL_IDS)))
+
+    channel = FakeChannel(next(iter(B.ALLOWED_CHANNEL_IDS), 12345))
 
     errors = {"count": 0}
     sem = asyncio.Semaphore(concurrency)

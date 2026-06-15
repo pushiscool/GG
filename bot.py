@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import time
@@ -70,16 +71,23 @@ def _env_ids(name: str, default: set) -> set:
 
 ALERT_USER_ID = _env_int("ALERT_USER_ID", 920819377627099166)
 ALERT_MESSAGE = f"<@{ALERT_USER_ID}>"
-ALLOWED_CHANNEL_IDS = _env_ids(
-    "ALLOWED_CHANNEL_IDS", {1515821430586216468, 1508284501485162541}
-)
+
+
+ALLOWED_CHANNEL_IDS = _env_ids("ALLOWED_CHANNEL_IDS", set())
+
+
+def is_watched_channel(channel_id) -> bool:
+    return (not ALLOWED_CHANNEL_IDS) or (channel_id in ALLOWED_CHANNEL_IDS)
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v", ".mkv"}
+AUDIO_EXTENSIONS = {".ogg", ".oga", ".opus", ".m4a", ".mp3", ".wav", ".flac", ".aac", ".aiff", ".aif"}
 
 
 MAX_SCAN_BYTES = _env_int("MAX_SCAN_BYTES", 8 * 1024 * 1024)
 MAX_VIDEO_SCAN_BYTES = _env_int("MAX_VIDEO_SCAN_BYTES", 32 * 1024 * 1024)
+MAX_AUDIO_SCAN_BYTES = _env_int("MAX_AUDIO_SCAN_BYTES", 16 * 1024 * 1024)
+MAX_AUDIO_SECONDS = _env_int("MAX_AUDIO_SECONDS", 60)
 MAX_OCR_FRAMES = _env_int("MAX_OCR_FRAMES", 12)
 MAX_NSFW_FRAMES = _env_int("MAX_NSFW_FRAMES", 4)
 MAX_VIDEO_FRAMES = _env_int("MAX_VIDEO_FRAMES", 5)
@@ -105,6 +113,9 @@ MAX_INVITES_PER_MESSAGE = max(1, _env_int("MAX_INVITES_PER_MESSAGE", 3))
 INVITE_RESOLVE_TIMEOUT = _env_int("INVITE_RESOLVE_TIMEOUT", 10)
 INVITE_CACHE_TTL = _env_int("INVITE_CACHE_TTL", 600)
 INVITE_CACHE_MAX = _env_int("INVITE_CACHE_MAX", 2000)
+
+
+
 FLAG_ALL_INVITES = _env_bool("FLAG_ALL_INVITES", True)
 INVITE_BASE_SCORE = _env_int("INVITE_BASE_SCORE", ALERT_THRESHOLD)
 
@@ -115,6 +126,7 @@ RESTART_MIN_BACKOFF = _env_float("RESTART_MIN_BACKOFF", 3.0)
 RESTART_MAX_BACKOFF = _env_float("RESTART_MAX_BACKOFF", 300.0)
 HEARTBEAT_LOG_INTERVAL = _env_int("HEARTBEAT_LOG_INTERVAL", 300)
 LOG_FILE = os.environ.get("LOG_FILE", "safety_bot.log")
+AUDIO_LANGUAGE = os.environ.get("AUDIO_LANGUAGE", "en-US")
 
 URL_RE = re.compile(r"https?://|discord\.gift|discord\.gg|www\.", re.IGNORECASE)
 SHORTENER_RE = re.compile(
@@ -410,6 +422,8 @@ def strip_discord_markup(text: str) -> str:
 def invite_match_text(text: str) -> str:
     text = strip_discord_markup(text or "")
     text = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", text)
+    text = re.sub(r"\bdot\b", ".", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bslash\b", "/", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*([./])\s*", r"\1", text)
     return re.sub(r"\s+", " ", text)
 
@@ -755,6 +769,13 @@ def is_video_attachment(attachment) -> bool:
     return content_type.startswith("video/") or suffix in VIDEO_EXTENSIONS
 
 
+def is_audio_attachment(attachment) -> bool:
+    content_type = normalize_text(getattr(attachment, "content_type", ""))
+    filename = normalize_text(getattr(attachment, "filename", ""))
+    suffix = Path(filename).suffix
+    return content_type.startswith("audio/") or suffix in AUDIO_EXTENSIONS
+
+
 def attachment_label(attachment) -> str:
     filename = getattr(attachment, "filename", None) or "attachment"
     url = getattr(attachment, "url", None) or getattr(attachment, "proxy_url", None)
@@ -785,7 +806,7 @@ def media_urls_from_message(message) -> list[str]:
 
         embed_url = getattr(embed, "url", None)
         suffix = suffix_from_url(embed_url or "")
-        if suffix in IMAGE_EXTENSIONS or suffix in VIDEO_EXTENSIONS:
+        if suffix in IMAGE_EXTENSIONS or suffix in VIDEO_EXTENSIONS or suffix in AUDIO_EXTENSIONS:
             add_url(embed_url)
 
     return urls
@@ -1208,6 +1229,60 @@ def scan_video_bytes(data: bytes, suffix: str = ".mp4") -> tuple[str, bool, tupl
     return "\n".join(text_parts), has_qr, tuple(nsfw_detections)
 
 
+def get_ffmpeg_exe() -> str:
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"
+
+
+def transcribe_audio_bytes(data: bytes, suffix: str = ".ogg") -> str:
+    if not data:
+        return ""
+
+    try:
+        import speech_recognition as sr
+    except Exception:
+        return ""
+
+    suffix = suffix if suffix.startswith(".") else f".{suffix}"
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = Path(temp_dir) / f"input{suffix or '.ogg'}"
+            wav_path = Path(temp_dir) / "audio.wav"
+            input_path.write_bytes(data)
+            subprocess.run(
+                [
+                    get_ffmpeg_exe(),
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-t",
+                    str(MAX_AUDIO_SECONDS),
+                    "-i",
+                    str(input_path),
+                    "-ac",
+                    "1",
+                    "-ar",
+                    "16000",
+                    str(wav_path),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=True,
+                timeout=MAX_AUDIO_SECONDS + 20,
+            )
+            recognizer = sr.Recognizer()
+            with sr.AudioFile(str(wav_path)) as source:
+                audio = recognizer.record(source, duration=MAX_AUDIO_SECONDS)
+            return str(recognizer.recognize_google(audio, language=AUDIO_LANGUAGE)).strip()
+    except Exception:
+        return ""
+
+
 def assess_media_bytes(
     data: bytes, suffix: str, *, source: str = ""
 ) -> tuple[ScamAssessment, str, bool, tuple[str, ...]]:
@@ -1215,6 +1290,11 @@ def assess_media_bytes(
     if suffix in VIDEO_EXTENSIONS:
         text, has_qr, nsfw = scan_video_bytes(data, suffix or ".mp4")
         kind = "video"
+    elif suffix in AUDIO_EXTENSIONS:
+        text = transcribe_audio_bytes(data, suffix or ".ogg")
+        has_qr = False
+        nsfw = ()
+        kind = "audio"
     else:
         text, has_qr = extract_text_from_image_bytes(data)
         nsfw = detect_nsfw_from_image_bytes(data)
@@ -1238,6 +1318,10 @@ class SafetyBot(commands.Bot):
         intents.messages = True
         intents.message_content = True
         self.alerted_message_ids: "OrderedDict[int, None]" = OrderedDict()
+
+
+
+        self._processing_ids: set = set()
         self._scan_semaphore = asyncio.Semaphore(SCAN_CONCURRENCY)
         self._heartbeat_task = None
 
@@ -1245,11 +1329,17 @@ class SafetyBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def on_ready(self) -> None:
+        scope = (
+            "ALL channels"
+            if not ALLOWED_CHANNEL_IDS
+            else f"channels {sorted(ALLOWED_CHANNEL_IDS)}"
+        )
         log.info(
-            "Logged in as %s | watching %d channel(s) | scan concurrency=%d",
+            "Logged in as %s | watching %s | scan concurrency=%d | flag_all_invites=%s",
             self.user,
-            len(ALLOWED_CHANNEL_IDS),
+            scope,
             SCAN_CONCURRENCY,
+            FLAG_ALL_INVITES,
         )
 
 
@@ -1321,6 +1411,23 @@ class SafetyBot(commands.Bot):
         suffix = Path(normalize_text(getattr(attachment, "filename", ""))).suffix or ".mp4"
         return await asyncio.to_thread(scan_video_bytes, data, suffix)
 
+    async def scan_audio_attachment(self, attachment) -> tuple[str, bool, tuple[str, ...]]:
+        if not is_audio_attachment(attachment):
+            return "", False, ()
+
+        size = getattr(attachment, "size", 0) or 0
+        if size > MAX_AUDIO_SCAN_BYTES:
+            return "", False, ()
+
+        try:
+            data = await attachment.read()
+        except (nextcord.HTTPException, AttributeError):
+            return "", False, ()
+
+        suffix = Path(normalize_text(getattr(attachment, "filename", ""))).suffix or ".ogg"
+        text = await asyncio.to_thread(transcribe_audio_bytes, data, suffix)
+        return text, False, ()
+
     async def scan_media_url(self, url: str) -> tuple[str, bool, tuple[str, ...], str]:
         try:
             import aiohttp
@@ -1335,14 +1442,20 @@ class SafetyBot(commands.Bot):
                         return "", False, (), "image"
                     content_type = normalize_text(response.headers.get("content-type", ""))
                     suffix = suffix_from_url(url)
-                    is_video = content_type.startswith("video/") or suffix in VIDEO_EXTENSIONS
-                    limit = MAX_VIDEO_SCAN_BYTES if is_video else MAX_SCAN_BYTES
+                    is_audio = content_type.startswith("audio/") or suffix in AUDIO_EXTENSIONS
+                    is_video = (not is_audio) and (content_type.startswith("video/") or suffix in VIDEO_EXTENSIONS)
+                    limit = MAX_AUDIO_SCAN_BYTES if is_audio else (MAX_VIDEO_SCAN_BYTES if is_video else MAX_SCAN_BYTES)
                     data = await read_capped(response, limit + 1)
         except Exception:
             return "", False, (), "image"
 
         if len(data) > limit:
-            return "", False, (), "video" if is_video else "image"
+            return "", False, (), "audio" if is_audio else ("video" if is_video else "image")
+
+        if is_audio:
+            suffix = suffix_from_url(url) or ".ogg"
+            text = await asyncio.to_thread(transcribe_audio_bytes, data, suffix)
+            return text, False, (), "audio"
 
         if is_video:
             suffix = suffix_from_url(url) or ".mp4"
@@ -1419,6 +1532,9 @@ class SafetyBot(commands.Bot):
             nsfw_flag=bool(guild.get("nsfw")),
         )
 
+    async def build_invite_assessment(self, code: str) -> Optional[ScamAssessment]:
+        return apply_invite_policy(code, await self.resolve_invite(code))
+
     async def assess_message(
         self, message: nextcord.Message
     ) -> tuple[Optional[ScamAssessment], list[ForwardedSource]]:
@@ -1427,6 +1543,7 @@ class SafetyBot(commands.Bot):
 
         visual_attachments: list = []
         video_attachments: list = []
+        audio_attachments: list = []
         media_urls: list[str] = []
         seen_urls: set[str] = set()
         text_chunks: list[str] = []
@@ -1437,6 +1554,8 @@ class SafetyBot(commands.Bot):
                     visual_attachments.append(attachment)
                 elif is_video_attachment(attachment):
                     video_attachments.append(attachment)
+                elif is_audio_attachment(attachment):
+                    audio_attachments.append(attachment)
             for url in media_urls_from_message(source):
                 if url not in seen_urls:
                     seen_urls.add(url)
@@ -1446,7 +1565,7 @@ class SafetyBot(commands.Bot):
                 text_chunks.append(content)
             text_chunks.extend(embed_text_from_message(source))
 
-        has_media = bool(visual_attachments or video_attachments or media_urls)
+        has_media = bool(visual_attachments or video_attachments or audio_attachments or media_urls)
 
         message_text = "\n".join(text_chunks)
         text_invite_assessment = first_invite_link_assessment(message_text)
@@ -1456,7 +1575,11 @@ class SafetyBot(commands.Bot):
         media_text_parts: list[str] = []
         has_qr = False
         nsfw_detections = []
-        content_kind = "video" if video_attachments and not visual_attachments else "image"
+        content_kind = (
+            "audio"
+            if audio_attachments and not visual_attachments and not video_attachments
+            else ("video" if video_attachments and not visual_attachments else "image")
+        )
 
 
 
@@ -1484,6 +1607,18 @@ class SafetyBot(commands.Bot):
             has_qr = has_qr or attachment_has_qr
             nsfw_detections.extend(attachment_nsfw_detections)
 
+        for attachment in audio_attachments:
+            media_text_parts.append(getattr(attachment, "filename", ""))
+            try:
+                extracted_text, attachment_has_qr, attachment_nsfw_detections = await self.scan_audio_attachment(attachment)
+            except Exception:
+                log.exception("scan_audio_attachment failed; skipping one audio file")
+                continue
+            if extracted_text:
+                media_text_parts.append(extracted_text)
+            has_qr = has_qr or attachment_has_qr
+            nsfw_detections.extend(attachment_nsfw_detections)
+
         for url in media_urls:
             media_text_parts.append(url)
             try:
@@ -1497,6 +1632,8 @@ class SafetyBot(commands.Bot):
             nsfw_detections.extend(url_nsfw_detections)
             if url_kind == "video":
                 content_kind = "video"
+            elif url_kind == "audio" and content_kind == "image":
+                content_kind = "audio"
 
         assessments = []
         if message_text.strip():
@@ -1526,7 +1663,7 @@ class SafetyBot(commands.Bot):
         except Exception:
             invite_codes = []
         for code in invite_codes:
-            invite_assessment = apply_invite_policy(code, await self.resolve_invite(code))
+            invite_assessment = await self.build_invite_assessment(code)
             if invite_assessment is not None:
                 assessments.append(invite_assessment)
 
@@ -1606,36 +1743,45 @@ class SafetyBot(commands.Bot):
             return
 
         message_id = getattr(message, "id", None)
-        if message_id in self.alerted_message_ids:
-            return
 
         channel = getattr(message, "channel", None)
-        if getattr(channel, "id", None) not in ALLOWED_CHANNEL_IDS:
+        if not is_watched_channel(getattr(channel, "id", None)):
             return
 
 
 
+
+        if message_id is not None:
+            if message_id in self.alerted_message_ids or message_id in self._processing_ids:
+                return
+            self._processing_ids.add(message_id)
+
         try:
-            async with self._scan_semaphore:
-                assessment, forwarded_sources = await asyncio.wait_for(
-                    self.assess_message(message), timeout=SCAN_TIMEOUT_SECONDS
+            try:
+                async with self._scan_semaphore:
+                    assessment, forwarded_sources = await asyncio.wait_for(
+                        self.assess_message(message), timeout=SCAN_TIMEOUT_SECONDS
+                    )
+            except asyncio.TimeoutError:
+                log.warning("scan timed out for message %s", message_id)
+                return
+
+            if assessment is None:
+                return
+
+            try:
+                await message.channel.send(
+                    content=ALERT_MESSAGE,
+                    embed=self.build_alert_embed(message, assessment, forwarded_sources),
+                    allowed_mentions=nextcord.AllowedMentions(users=True, roles=False, everyone=False),
                 )
-        except asyncio.TimeoutError:
-            log.warning("scan timed out for message %s", message_id)
-            return
+                self._mark_alerted(message_id)
+            except (nextcord.Forbidden, nextcord.HTTPException):
+                pass
+        finally:
 
-        if assessment is None:
-            return
 
-        try:
-            await message.channel.send(
-                content=ALERT_MESSAGE,
-                embed=self.build_alert_embed(message, assessment, forwarded_sources),
-                allowed_mentions=nextcord.AllowedMentions(users=True, roles=False, everyone=False),
-            )
-            self._mark_alerted(message_id)
-        except (nextcord.Forbidden, nextcord.HTTPException):
-            pass
+            self._processing_ids.discard(message_id)
 
     async def on_message(self, message: nextcord.Message) -> None:
         await self.handle_message(message)
@@ -1645,7 +1791,7 @@ class SafetyBot(commands.Bot):
 
     async def on_raw_message_edit(self, payload: nextcord.RawMessageUpdateEvent) -> None:
         try:
-            if payload.channel_id not in ALLOWED_CHANNEL_IDS:
+            if not is_watched_channel(payload.channel_id):
                 return
 
             if payload.message_id in self.alerted_message_ids:
@@ -1681,7 +1827,9 @@ def fetch_target_bytes(target: str) -> tuple[bytes, str]:
             content_type = normalize_text(response.headers.get("content-type", ""))
         suffix = suffix_from_url(target)
         if not suffix:
-            if content_type.startswith("video/"):
+            if content_type.startswith("audio/"):
+                suffix = ".ogg"
+            elif content_type.startswith("video/"):
                 suffix = ".mp4"
             elif "gif" in content_type:
                 suffix = ".gif"
@@ -1760,7 +1908,7 @@ def run_cli(args: list[str]) -> int:
                 nsfw_flag=bool(guild.get("nsfw")),
             )
         except Exception as error:
-            print(f"destination : could NOT be resolved ({error})")
+            print(f"destination : could NOT be resolved ({error}) — expired/private/unreachable")
         final = apply_invite_policy(code, resolved)
         if final is None:
             print("--- assessment ---")

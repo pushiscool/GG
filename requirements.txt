@@ -5,3 +5,5 @@ rapidocr-onnxruntime>=1.4.4
 Pillow
 opencv-python-headless
 aiohttp
+SpeechRecognition
+imageio-ffmpeg
