@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.gohar.safetybot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/pushpakjain/APDiscordBot/GG/run_forever.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/pushpakjain/APDiscordBot/GG</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/pushpakjain/APDiscordBot/GG/keepalive.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/pushpakjain/APDiscordBot/GG/keepalive.err.log</string>
+</dict>
+</plist>
