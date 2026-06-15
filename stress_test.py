@@ -135,19 +135,20 @@ class FakeChannel:
 
 
 class FakeAuthor:
-    def __init__(self):
+    def __init__(self, roles=None):
         self.id = random.randint(1, 10 ** 18)
         self.mention = "@user"
         self.bot = False
+        self.roles = roles or []
 
 
 class FakeMessage:
-    def __init__(self, mid, content, channel, reference=False):
+    def __init__(self, mid, content, channel, reference=False, roles=None):
         self.id = mid
         self.content = content
         self.channel = channel
         self.guild = object()
-        self.author = FakeAuthor()
+        self.author = FakeAuthor(roles)
         self.attachments = []
         self.embeds = []
         self.reference = object() if reference else None
@@ -177,6 +178,10 @@ async def stress_handle(total=2000, concurrency=50):
     bot.http = FakeHTTP()
 
     channel = FakeChannel(next(iter(B.ALLOWED_CHANNEL_IDS), 12345))
+    exempt_role = type("Role", (), {"id": next(iter(B.MODERATION_BYPASS_ROLE_IDS))})()
+    exempt_msg = FakeMessage(999999, "discord.gg/bad", channel, roles=[exempt_role])
+    await bot.handle_message(exempt_msg)
+    assert channel.sent == 0
 
     errors = {"count": 0}
     sem = asyncio.Semaphore(concurrency)

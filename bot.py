@@ -80,10 +80,25 @@ ALERT_MESSAGE = f"<@{ALERT_USER_ID}>"
 
 
 ALLOWED_CHANNEL_IDS = _env_ids("ALLOWED_CHANNEL_IDS", set())
+MODERATION_BYPASS_ROLE_IDS = _env_ids(
+    "MODERATION_BYPASS_ROLE_IDS",
+    {
+        1514376334372241449,
+        1407922165369802854,
+        1407922499882061974,
+        1407120344304586802,
+        1000843059824697434,
+    },
+)
 
 
 def is_watched_channel(channel_id) -> bool:
     return (not ALLOWED_CHANNEL_IDS) or (channel_id in ALLOWED_CHANNEL_IDS)
+
+
+def has_moderation_bypass_role(member) -> bool:
+    role_ids = {getattr(role, "id", None) for role in getattr(member, "roles", [])}
+    return bool(role_ids & MODERATION_BYPASS_ROLE_IDS)
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".m4v", ".mkv"}
@@ -1763,7 +1778,11 @@ class SafetyBot(commands.Bot):
         if getattr(message, "guild", None) is None:
             return
 
-        if getattr(getattr(message, "author", None), "bot", False):
+        author = getattr(message, "author", None)
+        if getattr(author, "bot", False):
+            return
+
+        if has_moderation_bypass_role(author):
             return
 
         message_id = getattr(message, "id", None)
