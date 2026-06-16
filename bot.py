@@ -269,6 +269,20 @@ FREE_NITRO_RE = re.compile(
     r"|\bsteamcommunity\b",
     re.IGNORECASE,
 )
+ADVANCE_FEE_RE = re.compile(
+    r"(?:private\s*bank\s*code|transfer\s*code|security\s*prot|code\s*purchase|purchasable\s*code|purchase\s*the\s*code)"
+    r"|(?:withdrawal|transfer|security|activation|processing)\s*(?:fee|code)"
+    r"|(?:fee|cost|amount)\s*(?:to|for|of)?\s*(?:complete|process|release|unlock|access|purchase|withdrawal)"
+    r"|provide\s*amount\s*to\s*the\s*bank"
+    r"|cannot\s*be\s*(?:paid|deducted)"
+    r"|deducted\s*from\s*your\s*[\w\s]*balance"
+    r"|withdrawal\s*(?:process|access)"
+    r"|complete\s*your\s*withdrawal"
+    r"|once\s*we\s*receive\s*(?:the\s*)?\$?\d"
+    r"|send\s*to\s*your\s*(?:mail|sms)"
+    r"|xchangepay",
+    re.IGNORECASE,
+)
 INVITE_RE = re.compile(
     r"(?:https?://)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com/invite)/+([a-z0-9][a-z0-9-]{1,31})",
     re.IGNORECASE,
@@ -497,6 +511,7 @@ def assess_scam_text(
     has_investment = bool(INVESTMENT_RE.search(normalized))
     has_gambling = bool(GAMBLING_RE.search(normalized))
     has_free_nitro = bool(FREE_NITRO_RE.search(normalized))
+    has_advance_fee = bool(ADVANCE_FEE_RE.search(normalized))
     has_bare_domain = bool(BARE_DOMAIN_RE.search(normalized))
     has_url = bool(URL_RE.search(normalized) or SHORTENER_RE.search(normalized) or SUSPICIOUS_DOMAIN_RE.search(normalized))
     has_parody = contains_any(normalized, PARODY_TERMS)
@@ -610,6 +625,18 @@ def assess_scam_text(
     if has_free_nitro and (has_url or has_bare_domain or has_qr or has_dm_lure):
         score += 20
         reasons.append("free Nitro/gift lure with a link or contact path")
+
+    if has_advance_fee:
+        score += 45
+        reasons.append("advance-fee withdrawal or code-purchase wording")
+
+    if has_advance_fee and has_money:
+        score += 20
+        reasons.append("advance-fee wording tied to a payment amount")
+
+    if has_advance_fee and ("withdrawal" in normalized or "account" in normalized or has_crypto_receipt):
+        score += 15
+        reasons.append("payment/code request tied to withdrawal or account access")
 
     if has_url:
         score += 30

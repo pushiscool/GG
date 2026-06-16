@@ -40,6 +40,13 @@ def fuzz_pure(iterations=12000):
     assert B.extract_invite_codes("join discord.gg/gohar") == ["gohar"]
     assert B.first_invite_link_assessment("join discord.gg/gohar") is None
     assert B.first_invite_link_assessment("join discord.gg/gohar and discord.gg/bad") is not None
+    withdrawal_code_scam = (
+        "private bank code is a purchasable code which cost $57 BDT 7000 "
+        "you need provide amount to the bank and get the codepurchase in order "
+        "to complete your withdrawal process it cannot be deducted from your balance "
+        "once we receive the $57 we can purchase the code and send to your mail or sms"
+    )
+    assert B.assess_scam_text(withdrawal_code_scam).should_alert
     weird = [
         None, "", " ", "|" * 3000, "||" * 2000, "*" * 3000, "a" * 8000,
         "f||r||ee m||on||ey", "https://discord.gg/" + "x" * 1500,
